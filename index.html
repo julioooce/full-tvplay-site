@@ -2798,46 +2798,21 @@
                         const el = document.getElementById(id);
                         if (!el || !el.value.trim()) {
                             alert('Preencha os dados de entrega da TV Box.');
-                            if (el)
-                                el.focus();
+                            if (el) el.focus();
                             return;
                         }
                     }
                 }
-                const order = '#' + Math.floor(100000 + Math.random() * 900000);
-                const payload = {
-                    pedido: order,
-                    cliente: name,
-                    whatsapp: document.getElementById('buyerPhone').value.trim(),
-                    produto: currentProduct[0],
-                    valor: currentProduct[1],
-                    fisico: !!currentProduct[2],
-                    status: 'AGUARDANDO PIX',
-                    criadoEm: firebase.firestore.FieldValue.serverTimestamp()
-                };
-                if (currentProduct[2])
-                    Object.assign(payload, {
-                        cep: document.getElementById('buyerCep')?.value || '',
-                        endereco: document.getElementById('buyerAddress')?.value || '',
-                        numero: document.getElementById('buyerNumber')?.value || '',
-                        bairro: document.getElementById('buyerDistrict')?.value || '',
-                        complemento: document.getElementById('buyerComplement')?.value || '',
-                        cidade: document.getElementById('buyerCity')?.value || '',
-                        estado: document.getElementById('buyerState')?.value || ''
-                    });
-                try {
-                    if (!window.db)
-                        throw new Error('Firebase não foi carregado.');
-                    const ref = await db.collection('pedidos').add(payload);
-                    currentOrderDocId = ref.id;
-                    currentOrderNumber = order;
 
+                const order = '#' + Math.floor(100000 + Math.random() * 900000);
+                currentOrderNumber = order;
+
+                try {
+                    // Primeiro gera o Pix. Assim o cliente não depende da permissão do Firestore.
                     const valorNumerico = Number(String(currentProduct[1]).replace(/[^0-9,]/g, '').replace(',', '.'));
                     const pixResp = await fetch(PIX_API + '/criar-pix', {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             valor: valorNumerico,
                             descricao: currentProduct[0] + ' - ' + order,
@@ -2846,19 +2821,48 @@
                             referencia: order.replace('#', '')
                         })
                     });
+
                     const pix = await pixResp.json();
                     if (!pixResp.ok || !pix.sucesso)
                         throw new Error(pix.erro || 'Não foi possível gerar o Pix.');
 
                     currentPaymentId = pix.payment_id;
-                    // Vincula o ID real do Mercado Pago ao pedido. Isso evita perder a referência
-                    // e facilita qualquer conferência posterior.
-                    if (currentOrderDocId && window.db) {
-                        await db.collection('pedidos').doc(currentOrderDocId).set({
-                            paymentId: currentPaymentId,
-                            externalReference: pix.external_reference || order.replace('#', '')
-                        }, { merge: true });
+
+                    // Salva o pedido no Firestore sem bloquear o Pix caso as regras neguem acesso anônimo.
+                    const payload = {
+                        pedido: order,
+                        cliente: name,
+                        whatsapp: document.getElementById('buyerPhone').value.trim(),
+                        produto: currentProduct[0],
+                        valor: currentProduct[1],
+                        fisico: !!currentProduct[2],
+                        status: 'AGUARDANDO PIX',
+                        paymentId: currentPaymentId,
+                        externalReference: pix.external_reference || order.replace('#', ''),
+                        criadoEm: firebase.firestore.FieldValue.serverTimestamp()
+                    };
+                    if (currentProduct[2]) {
+                        Object.assign(payload, {
+                            cep: document.getElementById('buyerCep')?.value || '',
+                            endereco: document.getElementById('buyerAddress')?.value || '',
+                            numero: document.getElementById('buyerNumber')?.value || '',
+                            bairro: document.getElementById('buyerDistrict')?.value || '',
+                            complemento: document.getElementById('buyerComplement')?.value || '',
+                            cidade: document.getElementById('buyerCity')?.value || '',
+                            estado: document.getElementById('buyerState')?.value || ''
+                        });
                     }
+
+                    if (window.db) {
+                        try {
+                            const ref = await db.collection('pedidos').add(payload);
+                            currentOrderDocId = ref.id;
+                        } catch (firestoreError) {
+                            currentOrderDocId = null;
+                            console.warn('Pedido não pôde ser salvo no Firestore, mas o Pix foi criado normalmente:', firestoreError);
+                        }
+                    }
+
                     document.getElementById('pixValue').textContent = currentProduct[1];
                     document.getElementById('pixCode').value = pix.qr_code;
                     document.getElementById('pixQrImage').src = 'data:image/png;base64,' + pix.qr_code_base64;
